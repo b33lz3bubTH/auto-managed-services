@@ -52,6 +52,10 @@ func main() {
 	superUserDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable",
 		pgUser, pgPassword, pgHost, pgPort)
 	
+	// Ensure pgbouncer_auth user exists and userlist.txt is created FIRST
+	// This must happen before starting HTTP server so pgbouncer can start
+	ensurePgBouncerAuth()
+	
 	// Get listen port
 	listenPort := getEnv("LISTEN_PORT", "8080")
 	listenAddr = ":" + listenPort
@@ -186,8 +190,10 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return only the connection string with URL-encoded credentials
+	// Use pgbouncer port (6432) instead of postgres port (5432)
+	pgbouncerHost := getEnv("PGBOUNCER_HOST", "localhost")
 	userInfo := url.UserPassword(userName, password)
-	connStr := fmt.Sprintf("postgres://%s@postgres:5432/%s?sslmode=disable", userInfo.String(), dbName)
+	connStr := fmt.Sprintf("postgres://%s@%s:6432/%s?sslmode=disable", userInfo.String(), pgbouncerHost, dbName)
 	
 	log.Printf("✅ Provisioned: %s", dbName)
 
@@ -204,7 +210,7 @@ func generateAdminKey(length int) string {
 }
 
 func generatePassword(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*-_=+"
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@$"
 	b := make([]byte, length)
 	for i := range b {
 		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
@@ -223,4 +229,80 @@ func getEnv(key, defaultVal string) string {
 func quoteIdentifier(ident string) string {
 	// PostgreSQL identifier quoting: double quotes and escape any existing double quotes
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+}
+
+func ensurePgBouncerAuth() {
+	db, err := sql.Open("postgres", superUserDSN)
+	if err != nil {
+		log.Printf("⚠️  Failed to connect for pgbouncer_auth setup: %v", err)
+		return
+	}
+	defer db.Close()
+
+	pgbouncerAuthPassword := getEnv("PGBOUNCER_AUTH_PASSWORD", "pgbouncer_auth_pass")
+
+	// Create pgbouncer_auth user if it doesn't exist
+	_, err = db.Exec(fmt.Sprintf(`
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgbouncer_auth') THEN
+				CREATE ROLE pgbouncer_auth WITH LOGIN PASSWORD $pwd$%s$pwd$;
+			ELSE
+				ALTER ROLE pgbouncer_auth WITH PASSWORD $pwd$%s$pwd$;
+			END IF;
+		END
+		$$;
+	`, pgbouncerAuthPassword, pgbouncerAuthPassword))
+	if err != nil {
+		log.Printf("⚠️  Failed to create/update pgbouncer_auth user: %v", err)
+		return
+	}
+
+	// Grant necessary permissions
+	_, err = db.Exec(`
+		GRANT pg_read_all_settings TO pgbouncer_auth;
+		GRANT pg_read_all_stats TO pgbouncer_auth;
+		GRANT SELECT ON pg_shadow TO pgbouncer_auth;
+	`)
+	if err != nil {
+		log.Printf("⚠️  Failed to grant permissions to pgbouncer_auth: %v", err)
+		return
+	}
+
+	// Write userlist.txt to shared volume
+	// Use plaintext password for auth_user so PgBouncer can perform SCRAM auth to Postgres
+	if pgbouncerAuthPassword == "" {
+		log.Printf("⚠️  PGBOUNCER_AUTH_PASSWORD is empty")
+		return
+	}
+	userlistContent := fmt.Sprintf(`"pgbouncer_auth" "%s"`, pgbouncerAuthPassword)
+	userlistPath := "/etc/pgbouncer/userlist.txt"
+	
+	// Ensure directory exists and is readable by pgbouncer
+	if err := os.MkdirAll("/etc/pgbouncer", 0755); err != nil {
+		log.Printf("⚠️  Could not create /etc/pgbouncer directory: %v", err)
+		return
+	}
+	if err := os.Chmod("/etc/pgbouncer", 0755); err != nil {
+		log.Printf("⚠️  Could not chmod /etc/pgbouncer directory: %v", err)
+		return
+	}
+	
+	// Write file with proper permissions (readable by pgbouncer)
+	err = os.WriteFile(userlistPath, []byte(userlistContent), 0644)
+	if err != nil {
+		log.Printf("⚠️  Could not write userlist.txt: %v", err)
+		return
+	}
+	if err := os.Chmod(userlistPath, 0644); err != nil {
+		log.Printf("⚠️  Could not chmod userlist.txt: %v", err)
+		return
+	}
+	
+	// Verify file was written
+	if info, err := os.Stat(userlistPath); err == nil {
+		log.Printf("✅ PgBouncer auth user configured, userlist.txt created (%d bytes)", info.Size())
+	} else {
+		log.Printf("⚠️  userlist.txt verification failed: %v", err)
+	}
 }

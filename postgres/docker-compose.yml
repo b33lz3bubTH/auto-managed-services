@@ -8,6 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-superadmin}
       POSTGRES_DB: postgres
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:-pgbouncer_auth_pass}
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -22,7 +23,7 @@ services:
       -c hba_file=/etc/postgresql/pg_hba.conf
 
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -46,6 +47,11 @@ services:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       LISTEN_PORT: ${LISTEN_PORT:-8080}
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:-pgbouncer_auth_pass}
+      PGBOUNCER_HOST: ${PGBOUNCER_HOST:-localhost}
+
+    volumes:
+      - pgbouncer_data:/etc/pgbouncer
 
     depends_on:
       postgres:
@@ -84,8 +90,41 @@ services:
       timeout: 5s
       retries: 5
 
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: pgbouncer
+    restart: unless-stopped
+
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["/bin/sh /etc/pgbouncer/pgbouncer-start.sh"]
+
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer-start.sh:/etc/pgbouncer/pgbouncer-start.sh:ro
+      - pgbouncer_data:/etc/pgbouncer
+      - pgbouncer_data:/var/lib/pgbouncer
+
+    ports:
+      - "6432:6432"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      golang:
+        condition: service_healthy
+
+    networks:
+      - db-network
+
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6432 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
+  pgbouncer_data:
 
 networks:
   db-network:
