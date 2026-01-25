@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -131,21 +132,14 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	tx, err := db.Begin()
-	if err != nil {
-		log.Printf("❌ Transaction start failed: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "transaction start failed"})
-		return
-	}
-
 	// Create role with restricted privileges
-	_, err = tx.Exec(`
-		CREATE ROLE $1 WITH LOGIN PASSWORD $2
+	// Note: PostgreSQL doesn't support parameterized queries for DDL statements
+	// Use dollar-quoting for password to safely handle special characters
+	_, err = db.Exec(fmt.Sprintf(`
+		CREATE ROLE %s WITH LOGIN PASSWORD $pwd$%s$pwd$
 		NOSUPERUSER NOCREATEDB NOCREATEROLE;
-	`, userName, password)
+	`, quoteIdentifier(userName), password))
 	if err != nil {
-		tx.Rollback()
 		if strings.Contains(err.Error(), "already exists") {
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(ErrorResponse{Error: fmt.Sprintf("app '%s' already exists", req.AppName)})
@@ -157,10 +151,16 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create database
-	_, err = tx.Exec(fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, dbName, userName))
+	// Create database (cannot be in a transaction)
+	_, err = db.Exec(fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, quoteIdentifier(dbName), quoteIdentifier(userName)))
 	if err != nil {
-		tx.Rollback()
+		// Cleanup: drop the role if database creation failed
+		db.Exec(fmt.Sprintf(`DROP ROLE IF EXISTS %s`, quoteIdentifier(userName)))
+		if strings.Contains(err.Error(), "already exists") {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(ErrorResponse{Error: fmt.Sprintf("app '%s' already exists", req.AppName)})
+			return
+		}
 		log.Printf("❌ Database creation failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "database creation failed"})
@@ -168,9 +168,8 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Revoke public access
-	_, err = tx.Exec(fmt.Sprintf(`REVOKE ALL ON DATABASE %s FROM PUBLIC`, dbName))
+	_, err = db.Exec(fmt.Sprintf(`REVOKE ALL ON DATABASE %s FROM PUBLIC`, quoteIdentifier(dbName)))
 	if err != nil {
-		tx.Rollback()
 		log.Printf("❌ Revoke failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "permission revoke failed"})
@@ -178,24 +177,17 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Grant all privileges to the app user only
-	_, err = tx.Exec(fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE %s TO %s`, dbName, userName))
+	_, err = db.Exec(fmt.Sprintf(`GRANT ALL PRIVILEGES ON DATABASE %s TO %s`, quoteIdentifier(dbName), quoteIdentifier(userName)))
 	if err != nil {
-		tx.Rollback()
 		log.Printf("❌ Grant failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(ErrorResponse{Error: "permission grant failed"})
 		return
 	}
 
-	if err = tx.Commit(); err != nil {
-		log.Printf("❌ Commit failed: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ErrorResponse{Error: "transaction commit failed"})
-		return
-	}
-
-	// Return only the connection string
-	connStr := fmt.Sprintf("postgres://%s:%s@postgres:5432/%s?sslmode=disable", userName, password, dbName)
+	// Return only the connection string with URL-encoded credentials
+	userInfo := url.UserPassword(userName, password)
+	connStr := fmt.Sprintf("postgres://%s@postgres:5432/%s?sslmode=disable", userInfo.String(), dbName)
 	
 	log.Printf("✅ Provisioned: %s", dbName)
 
@@ -226,4 +218,9 @@ func getEnv(key, defaultVal string) string {
 		return value
 	}
 	return defaultVal
+}
+
+func quoteIdentifier(ident string) string {
+	// PostgreSQL identifier quoting: double quotes and escape any existing double quotes
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }

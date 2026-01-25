@@ -2,13 +2,13 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod tidy
+RUN go mod download
 
 COPY main.go .
 RUN CGO_ENABLED=0 GOOS=linux go build -o db-provisioner .
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 WORKDIR /root/
 
 COPY --from=builder /app/db-provisioner .
