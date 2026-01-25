@@ -49,7 +49,7 @@ func main() {
 	pgHost := getEnv("POSTGRES_HOST", "postgres")
 	pgPort := getEnv("POSTGRES_PORT", "5432")
 	
-	superUserDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable",
+	superUserDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=require",
 		pgUser, pgPassword, pgHost, pgPort)
 	
 	// Ensure pgbouncer_auth user exists and userlist.txt is created FIRST
@@ -193,7 +193,7 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	// Use pgbouncer port (6432) instead of postgres port (5432)
 	pgbouncerHost := getEnv("PGBOUNCER_HOST", "localhost")
 	userInfo := url.UserPassword(userName, password)
-	connStr := fmt.Sprintf("postgres://%s@%s:6432/%s?sslmode=disable", userInfo.String(), pgbouncerHost, dbName)
+	connStr := fmt.Sprintf("postgres://%s@%s:6432/%s?sslmode=verify-full", userInfo.String(), pgbouncerHost, dbName)
 	
 	log.Printf("✅ Provisioned: %s", dbName)
 
