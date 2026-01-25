@@ -14,14 +14,14 @@ import (
 	"strings"
 
 	_ "github.com/lib/pq"
+	"github.com/joho/godotenv"
 )
 
-const (
-	superUserDSN = "postgres://postgres:superadmin@postgres:5432/postgres?sslmode=disable"
-	listenAddr   = ":8080"
+var (
+	adminKey     string
+	superUserDSN string
+	listenAddr   string
 )
-
-var adminKey string
 
 type ProvisionRequest struct {
 	AppName string `json:"app_name"`
@@ -37,6 +37,24 @@ type ErrorResponse struct {
 }
 
 func main() {
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		log.Printf("⚠️  .env file not found, using system environment")
+	}
+
+	// Build superUserDSN from environment
+	pgUser := getEnv("POSTGRES_USER", "postgres")
+	pgPassword := getEnv("POSTGRES_PASSWORD", "superadmin")
+	pgHost := getEnv("POSTGRES_HOST", "postgres")
+	pgPort := getEnv("POSTGRES_PORT", "5432")
+	
+	superUserDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable",
+		pgUser, pgPassword, pgHost, pgPort)
+	
+	// Get listen port
+	listenPort := getEnv("LISTEN_PORT", "8080")
+	listenAddr = ":" + listenPort
+
 	// Generate admin key on startup
 	adminKey = generateAdminKey(32)
 	log.Printf("🔑 ADMIN KEY: %s", adminKey)
@@ -201,4 +219,11 @@ func generatePassword(length int) string {
 		b[i] = charset[idx.Int64()]
 	}
 	return string(b)
+}
+
+func getEnv(key, defaultVal string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultVal
 }
