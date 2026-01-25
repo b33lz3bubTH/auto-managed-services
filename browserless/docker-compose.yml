@@ -7,7 +7,7 @@ services:
     environment:
       # Concurrency
       CONCURRENT: "3"
-      MAX_CONCURRENT: "2"
+      MAX_CONCURRENT: "6"
       QUEUE_LENGTH: "25"
 
       # Stealth & stability
@@ -31,11 +31,6 @@ services:
 
     expose:
       - "3000"
-
-    shm_size: "512m"
-    mem_limit: "1g"
-    cpus: "1.0"
-
     networks:
       - prn-net
 
