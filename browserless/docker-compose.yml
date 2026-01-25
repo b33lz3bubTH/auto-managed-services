@@ -1,0 +1,63 @@
+services:
+  browser:
+    image: ghcr.io/browserless/chromium:latest
+    container_name: prn-browser
+    restart: unless-stopped
+
+    environment:
+      # Concurrency
+      CONCURRENT: "3"
+      MAX_CONCURRENT: "2"
+      QUEUE_LENGTH: "25"
+
+      # Stealth & stability
+      DEFAULT_STEALTH: "true"
+      PREBOOT_CHROME: "true"
+      KEEP_ALIVE: "true"
+
+      # Timeouts
+      CONNECTION_TIMEOUT: "60000"
+
+      # Chrome flags
+      CHROME_FLAGS: >
+        --disable-blink-features=AutomationControlled
+        --disable-dev-shm-usage
+        --no-sandbox
+        --disable-infobars
+        --mute-audio
+
+      # 🔐 Access token (important even for testing)
+      TOKEN: "prn-secret-token"
+
+    expose:
+      - "3000"
+
+    shm_size: "512m"
+    mem_limit: "1g"
+    cpus: "1.0"
+
+    networks:
+      - prn-net
+
+
+  nginx:
+    image: nginx:alpine
+    container_name: prn-nginx
+    restart: unless-stopped
+
+    ports:
+      - "3001:80"
+
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+    depends_on:
+      - browser
+
+    networks:
+      - prn-net
+
+
+networks:
+  prn-net:
+    driver: bridge
