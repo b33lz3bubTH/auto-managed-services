@@ -1,0 +1,2 @@
+CREATE DATABASE app1_db OWNER app1_user;
+CREATE DATABASE app2_db OWNER app2_user;

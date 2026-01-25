@@ -1,0 +1,4 @@
+.env
+backups/
+postgres_data/
+.DS_Store
