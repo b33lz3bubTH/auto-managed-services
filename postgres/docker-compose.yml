@@ -23,7 +23,7 @@ services:
       -c hba_file=/etc/postgresql/pg_hba.conf
 
     ports:
-      - "5432:5432"
+      - ":5432"
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -129,3 +129,4 @@ volumes:
 networks:
   db-network:
     driver: bridge
+    name: nrix-echoware-sxyprn

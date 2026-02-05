@@ -67,9 +67,40 @@ func main() {
 
 	http.HandleFunc("/provision", provisionHandler)
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/sync-userlist", syncUserlistHandler)
 
 	log.Printf("📡 DB Provisioner listening on %s", listenAddr)
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
+}
+
+func syncUserlistHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "POST only"})
+		return
+	}
+
+	var req struct {
+		AdminKey string `json:"admin_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid request body"})
+		return
+	}
+
+	if req.AdminKey != adminKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(ErrorResponse{Error: "invalid admin key"})
+		return
+	}
+
+	syncUserlistFromDB()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "synced"})
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -189,9 +220,12 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync userlist.txt with new user's SCRAM secret and reload PgBouncer
+	syncUserlistFromDB()
+
 	// Return only the connection string with URL-encoded credentials
 	// Use pgbouncer port (6432) instead of postgres port (5432)
-	pgbouncerHost := getEnv("PGBOUNCER_HOST", "localhost")
+	pgbouncerHost := getEnv("PGBOUNCER_HOST", "pgbouncer")
 	userInfo := url.UserPassword(userName, password)
 	connStr := fmt.Sprintf("postgres://%s@%s:6432/%s?sslmode=disable", userInfo.String(), pgbouncerHost, dbName)
 	
@@ -232,77 +266,97 @@ func quoteIdentifier(ident string) string {
 }
 
 func ensurePgBouncerAuth() {
+	syncUserlistFromDB()
+}
+
+// syncUserlistFromDB queries all SCRAM secrets from pg_authid and writes to userlist.txt
+// This allows PgBouncer to authenticate all users via auth_file with SCRAM-SHA-256
+func syncUserlistFromDB() {
 	db, err := sql.Open("postgres", superUserDSN)
 	if err != nil {
-		log.Printf("⚠️  Failed to connect for pgbouncer_auth setup: %v", err)
+		log.Printf("⚠️  Failed to connect for userlist sync: %v", err)
 		return
 	}
 	defer db.Close()
 
-	pgbouncerAuthPassword := getEnv("PGBOUNCER_AUTH_PASSWORD", "pgbouncer_auth_pass")
-
-	// Create pgbouncer_auth user if it doesn't exist
-	_, err = db.Exec(fmt.Sprintf(`
-		DO $$
-		BEGIN
-			IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgbouncer_auth') THEN
-				CREATE ROLE pgbouncer_auth WITH LOGIN PASSWORD $pwd$%s$pwd$;
-			ELSE
-				ALTER ROLE pgbouncer_auth WITH PASSWORD $pwd$%s$pwd$;
-			END IF;
-		END
-		$$;
-	`, pgbouncerAuthPassword, pgbouncerAuthPassword))
-	if err != nil {
-		log.Printf("⚠️  Failed to create/update pgbouncer_auth user: %v", err)
-		return
-	}
-
-	// Grant necessary permissions
-	_, err = db.Exec(`
-		GRANT pg_read_all_settings TO pgbouncer_auth;
-		GRANT pg_read_all_stats TO pgbouncer_auth;
-		GRANT SELECT ON pg_shadow TO pgbouncer_auth;
+	// Query all login roles with SCRAM passwords
+	rows, err := db.Query(`
+		SELECT rolname, rolpassword 
+		FROM pg_authid 
+		WHERE rolcanlogin 
+		AND rolpassword IS NOT NULL 
+		AND rolpassword LIKE 'SCRAM-SHA-256$%'
 	`)
 	if err != nil {
-		log.Printf("⚠️  Failed to grant permissions to pgbouncer_auth: %v", err)
+		log.Printf("⚠️  Failed to query pg_authid: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var username, scramSecret string
+		if err := rows.Scan(&username, &scramSecret); err != nil {
+			log.Printf("⚠️  Scan error: %v", err)
+			continue
+		}
+		// Format: "username" "SCRAM-SHA-256$..."
+		lines = append(lines, fmt.Sprintf(`"%s" "%s"`, username, scramSecret))
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("⚠️  Rows iteration error: %v", err)
 		return
 	}
 
-	// Write userlist.txt to shared volume
-	// Use plaintext password for auth_user so PgBouncer can perform SCRAM auth to Postgres
-	if pgbouncerAuthPassword == "" {
-		log.Printf("⚠️  PGBOUNCER_AUTH_PASSWORD is empty")
+	if len(lines) == 0 {
+		log.Printf("⚠️  No SCRAM users found in pg_authid")
 		return
 	}
-	userlistContent := fmt.Sprintf(`"pgbouncer_auth" "%s"`, pgbouncerAuthPassword)
+
 	userlistPath := "/etc/pgbouncer/userlist.txt"
 	
-	// Ensure directory exists and is readable by pgbouncer
+	// Ensure directory exists
 	if err := os.MkdirAll("/etc/pgbouncer", 0755); err != nil {
 		log.Printf("⚠️  Could not create /etc/pgbouncer directory: %v", err)
 		return
 	}
-	if err := os.Chmod("/etc/pgbouncer", 0755); err != nil {
-		log.Printf("⚠️  Could not chmod /etc/pgbouncer directory: %v", err)
-		return
-	}
-	
-	// Write file with proper permissions (readable by pgbouncer)
-	err = os.WriteFile(userlistPath, []byte(userlistContent), 0644)
-	if err != nil {
+
+	// Write userlist.txt with all SCRAM secrets
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(userlistPath, []byte(content), 0644); err != nil {
 		log.Printf("⚠️  Could not write userlist.txt: %v", err)
 		return
 	}
-	if err := os.Chmod(userlistPath, 0644); err != nil {
-		log.Printf("⚠️  Could not chmod userlist.txt: %v", err)
+
+	log.Printf("✅ userlist.txt synced with %d users", len(lines))
+
+	// Try to reload PgBouncer (it may not be running yet on first boot)
+	reloadPgBouncer()
+}
+
+// reloadPgBouncer sends RELOAD command to PgBouncer admin console
+func reloadPgBouncer() {
+	pgbouncerHost := getEnv("PGBOUNCER_HOST", "pgbouncer")
+	pgUser := getEnv("POSTGRES_USER", "postgres")
+	pgPassword := getEnv("POSTGRES_PASSWORD", "superadmin")
+
+	// Connect to pgbouncer admin database
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:6432/pgbouncer?sslmode=disable",
+		pgUser, pgPassword, pgbouncerHost)
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		log.Printf("⚠️  Could not connect to PgBouncer admin: %v (may not be running yet)", err)
 		return
 	}
-	
-	// Verify file was written
-	if info, err := os.Stat(userlistPath); err == nil {
-		log.Printf("✅ PgBouncer auth user configured, userlist.txt created (%d bytes)", info.Size())
-	} else {
-		log.Printf("⚠️  userlist.txt verification failed: %v", err)
+	defer db.Close()
+
+	_, err = db.Exec("RELOAD")
+	if err != nil {
+		log.Printf("⚠️  PgBouncer RELOAD failed: %v (may not be running yet)", err)
+		return
 	}
+
+	log.Printf("✅ PgBouncer reloaded")
 }
