@@ -244,7 +244,7 @@ func generateAdminKey(length int) string {
 }
 
 func generatePassword(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@$"
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
 	for i := range b {
 		idx, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
@@ -341,8 +341,9 @@ func reloadPgBouncer() {
 	pgUser := getEnv("POSTGRES_USER", "postgres")
 	pgPassword := getEnv("POSTGRES_PASSWORD", "superadmin")
 
-	// Connect to pgbouncer admin database
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:6432/pgbouncer?sslmode=disable",
+	// Connect to pgbouncer admin database with simple query mode
+	// PgBouncer admin console doesn't support extended query protocol
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:6432/pgbouncer?sslmode=disable&prefer_simple_protocol=true",
 		pgUser, pgPassword, pgbouncerHost)
 
 	db, err := sql.Open("postgres", connStr)
@@ -352,11 +353,16 @@ func reloadPgBouncer() {
 	}
 	defer db.Close()
 
-	_, err = db.Exec("RELOAD")
+	// Set connection to use simple protocol
+	db.SetMaxOpenConns(1)
+	
+	// Use Query instead of Exec - pgbouncer admin returns results
+	rows, err := db.Query("RELOAD")
 	if err != nil {
 		log.Printf("⚠️  PgBouncer RELOAD failed: %v (may not be running yet)", err)
 		return
 	}
+	rows.Close()
 
 	log.Printf("✅ PgBouncer reloaded")
 }

@@ -28,5 +28,27 @@ if [ ! -r "$USERLIST_FILE" ]; then
     exit 1
 fi
 
+# Store initial checksum
+LAST_CHECKSUM=$(md5sum "$USERLIST_FILE" | cut -d' ' -f1)
+
+# Background watcher that reloads pgbouncer when userlist.txt changes
+watch_userlist() {
+    while true; do
+        sleep 5
+        if [ -f "$USERLIST_FILE" ]; then
+            CURRENT_CHECKSUM=$(md5sum "$USERLIST_FILE" | cut -d' ' -f1)
+            if [ "$CURRENT_CHECKSUM" != "$LAST_CHECKSUM" ]; then
+                echo "✓ userlist.txt changed, reloading pgbouncer..."
+                LAST_CHECKSUM="$CURRENT_CHECKSUM"
+                # Send SIGHUP to pgbouncer to reload auth file
+                pkill -HUP pgbouncer 2>/dev/null || true
+            fi
+        fi
+    done
+}
+
+# Start watcher in background
+watch_userlist &
+
 echo "Starting pgbouncer with config: $CONFIG_FILE"
 exec pgbouncer "$CONFIG_FILE"
