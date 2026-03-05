@@ -1,0 +1,236 @@
+# ============================================================
+# Databag — Enterprise Docker Compose (10k internal users)
+#
+# HOW TO USE:
+#   1. cp .env.example .env && nano .env   (set ADMIN_PASSWORD)
+#   2. docker compose down --remove-orphans --volumes
+#   3. docker compose up -d
+#   4. docker compose ps   ← both should show "Up"
+# ============================================================
+
+services:
+
+  databag:
+    image: balzack/databag:latest
+    container_name: databag
+    restart: unless-stopped
+    environment:
+      - ADMIN=${ADMIN_PASSWORD}
+    volumes:
+      - databag-data:/var/lib/databag
+    networks:
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "${DATABAG_CPU_LIMIT:-8.0}"
+          memory: "${DATABAG_MEM_LIMIT:-8G}"
+        reservations:
+          cpus: "2.0"
+          memory: "2G"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: databag-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    configs:
+      - source: nginx_config
+        target: /etc/nginx/nginx.conf
+    depends_on:
+      databag:
+        condition: service_started
+    networks:
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"
+    deploy:
+      resources:
+        limits:
+          cpus: "${NGINX_CPU_LIMIT:-2.0}"
+          memory: "${NGINX_MEM_LIMIT:-512M}"
+        reservations:
+          cpus: "0.5"
+          memory: "128M"
+
+configs:
+  nginx_config:
+    content: |
+      worker_processes      auto;
+      worker_rlimit_nofile  65535;
+
+      error_log  /var/log/nginx/error.log warn;
+      pid        /var/run/nginx.pid;
+
+      events {
+          worker_connections  4096;
+          use                 epoll;
+          multi_accept        on;
+      }
+
+      http {
+          include       /etc/nginx/mime.types;
+          default_type  application/octet-stream;
+
+          log_format main '$$remote_addr [$$time_local] "$$request" $$status '
+                          '"$$http_user_agent" rt=$$request_time';
+          access_log  /var/log/nginx/access.log main buffer=64k flush=5s;
+
+          sendfile                  on;
+          tcp_nopush                on;
+          tcp_nodelay               on;
+          keepalive_timeout         75s;
+          keepalive_requests        1000;
+          reset_timedout_connection on;
+          server_tokens             off;
+
+          client_max_body_size      0;
+          proxy_connect_timeout     10s;
+          proxy_send_timeout        300s;
+          proxy_read_timeout        300s;
+
+          gzip              on;
+          gzip_vary         on;
+          gzip_proxied      any;
+          gzip_comp_level   5;
+          gzip_min_length   1024;
+          gzip_types        text/plain text/css text/xml text/javascript
+                            application/json application/javascript
+                            application/xml image/svg+xml;
+
+          limit_req_zone  $$binary_remote_addr zone=api_limit:20m  rate=60r/s;
+          limit_req_zone  $$binary_remote_addr zone=auth_limit:10m rate=5r/s;
+          limit_conn_zone $$binary_remote_addr zone=conn_limit:20m;
+          limit_req_status  429;
+          limit_conn_status 429;
+
+          map $$http_upgrade $$connection_upgrade {
+              default   upgrade;
+              ""        close;
+          }
+
+          upstream databag_backend {
+              server databag:7000 max_fails=3 fail_timeout=30s;
+              keepalive 256;
+          }
+
+          server {
+              listen 80;
+              server_name _;
+
+              add_header X-Frame-Options           "SAMEORIGIN"                               always;
+              add_header X-Content-Type-Options    "nosniff"                                  always;
+              add_header X-XSS-Protection          "1; mode=block"                            always;
+              add_header Referrer-Policy           "strict-origin-when-cross-origin"          always;
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains"      always;
+              add_header Permissions-Policy        "camera=(), microphone=(), geolocation=()" always;
+
+              limit_conn conn_limit 200;
+
+              # ── WebSocket endpoints ───────────────────────────
+              # Databag uses gorilla/websocket whose default CheckOrigin
+              # compares the Origin header host against the Host header.
+              # When nginx proxies, these diverge → 403 rejected.
+              # Fix: rewrite Origin to match the forwarded Host so
+              # CheckOrigin always passes on internal traffic.
+              location ~* ^/(status|contact|channel|call) {
+                  proxy_pass              http://databag_backend;
+                  proxy_http_version      1.1;
+
+                  proxy_set_header        Upgrade    $$http_upgrade;
+                  proxy_set_header        Connection $$connection_upgrade;
+                  proxy_set_header        Host       $$host;
+                  proxy_set_header        X-Real-IP  $$remote_addr;
+                  proxy_set_header        X-Forwarded-For   $$proxy_add_x_forwarded_for;
+                  proxy_set_header        X-Forwarded-Proto $$scheme;
+
+                  # ← THE FIX: rewrite Origin to match Host so gorilla
+                  #   CheckOrigin sees origin host == request host
+                  proxy_set_header        Origin     $$scheme://$$host;
+
+                  proxy_buffering         off;
+                  proxy_request_buffering off;
+                  proxy_read_timeout      86400s;
+                  proxy_send_timeout      86400s;
+
+                  limit_req zone=api_limit burst=60 nodelay;
+              }
+
+              # ── Auth / Admin ──────────────────────────────────
+              location ~ ^/(api/v1/account/login|admin) {
+                  limit_req          zone=auth_limit burst=10 nodelay;
+                  proxy_pass         http://databag_backend;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Host              $$host;
+                  proxy_set_header   X-Real-IP         $$remote_addr;
+                  proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $$scheme;
+              }
+
+              # ── Static assets ─────────────────────────────────
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$$ {
+                  proxy_pass         http://databag_backend;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Host $$host;
+                  expires            30d;
+                  add_header         Cache-Control "public, immutable";
+              }
+
+              # ── Everything else ───────────────────────────────
+              location / {
+                  limit_req          zone=api_limit burst=120 nodelay;
+                  proxy_pass         http://databag_backend;
+                  proxy_http_version 1.1;
+                  proxy_set_header   Upgrade           $$http_upgrade;
+                  proxy_set_header   Connection        $$connection_upgrade;
+                  proxy_set_header   Host              $$host;
+                  proxy_set_header   X-Real-IP         $$remote_addr;
+                  proxy_set_header   X-Forwarded-For   $$proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $$scheme;
+                  proxy_set_header   Origin            $$scheme://$$host;
+                  proxy_buffering    off;
+                  client_max_body_size 0;
+              }
+
+              location = /health {
+                  access_log off;
+                  proxy_pass http://databag_backend/health;
+              }
+
+              location ~ /\.(git|env|ht) {
+                  deny  all;
+                  return 404;
+              }
+          }
+      }
+
+volumes:
+  databag-data:
+    driver: local
+
+networks:
+  internal-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET:-172.28.0.0/16}
