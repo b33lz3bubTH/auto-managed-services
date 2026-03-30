@@ -1,0 +1,137 @@
+You are a senior backend security engineer.
+
+Build a production-grade Python microservice using FastAPI that securely stores and retrieves sensitive data using HashiCorp Vault (Transit Engine + envelope encryption best practices).
+
+## Requirements
+
+### Core APIs
+
+1. POST /save
+Request body:
+{
+  "payload": "<string>"
+}
+
+Response:
+{
+  "id": "<uuid>"
+}
+
+Behavior:
+- Generate a unique ID for the record
+- Use envelope encryption:
+  - Generate a random Data Encryption Key (DEK) (32 bytes)
+  - Encrypt the payload locally using AES-256-GCM
+  - Send the DEK to Vault Transit Engine to encrypt it (KEK)
+- Store in DB:
+  - id
+  - encrypted_payload (base64)
+  - encrypted_dek (from Vault)
+  - nonce/iv (base64)
+  - created_at
+
+---
+
+2. GET /get/{id}
+
+Response:
+{
+  "id": "<uuid>",
+  "payload": "<decrypted string>"
+}
+
+Behavior:
+- Fetch record from DB
+- Decrypt DEK using Vault Transit
+- Use decrypted DEK to decrypt payload
+- Return plaintext payload
+
+---
+
+## Technical Requirements
+
+### Frameworks & Libraries
+- FastAPI
+- Python 3.11+
+- httpx (for Vault API calls)
+- cryptography (AES-256-GCM)
+- SQLAlchemy (or simple SQLite for demo)
+- pydantic
+
+---
+
+## Vault Integration
+
+- Use HashiCorp Vault Transit Engine
+- Assume Vault is running at http://localhost:8200
+- Use token authentication via environment variable: VAULT_TOKEN
+- Use key name: "tenant-default"
+
+### Vault APIs:
+- POST /v1/transit/encrypt/tenant-default
+- POST /v1/transit/decrypt/tenant-default
+
+---
+
+## Encryption Details
+
+- Use AES-256-GCM
+- Random 12-byte nonce per encryption
+- Return/store ciphertext in base64
+- Handle encoding/decoding cleanly
+
+---
+
+## Code Structure
+
+- main.py (FastAPI app)
+- vault.py (Vault client wrapper)
+- crypto.py (encryption/decryption logic)
+- db.py (SQLite setup)
+- models.py (ORM model)
+
+---
+
+## Additional Requirements
+
+- Proper error handling
+- Logging (no sensitive data in logs)
+- Clean, modular, readable code
+- Use dependency injection where appropriate
+- Include comments explaining security decisions
+- Use environment variables for config:
+  - VAULT_ADDR
+  - VAULT_TOKEN
+
+---
+
+## Optional (Nice to have)
+
+- Health check endpoint: GET /health
+- Retry logic for Vault calls
+- Timeout handling
+- Basic unit tests
+
+---
+
+## Output Format
+
+- Provide full working code (multiple files separated clearly)
+- Include instructions to run:
+  - how to start Vault (dev mode)
+  - how to enable transit engine
+  - how to create the key
+  - how to run the FastAPI service
+
+---
+
+## Important Constraints
+
+- NEVER expose raw encryption keys
+- NEVER log plaintext payloads
+- Follow security best practices strictly
+- Code should be realistic and production-oriented (not toy-level)
+
+---
+
+Now generate the complete implementation.
