@@ -56,3 +56,19 @@ class SecretService:
 
         logger.info("Retrieved secret id=%s for tenant=%s", secret_id, tenant_id)
         return plaintext
+
+    def list_ids(self, tenant_id: str) -> tuple[list[str], int]:
+        total = self._repo.count_by_tenant(tenant_id)
+        records = self._repo.list_by_tenant(tenant_id, offset=0, limit=1000)
+        return [r.id for r in records], total
+
+    def delete(self, tenant_id: str, secret_id: str) -> bool:
+        deleted = self._repo.delete(tenant_id, secret_id)
+        if deleted:
+            logger.info("Deleted secret id=%s for tenant=%s", secret_id, tenant_id)
+        return deleted
+
+    def delete_all_by_tenant(self, tenant_id: str) -> int:
+        count = self._repo.delete_all_by_tenant(tenant_id)
+        logger.info("Deleted %d secrets for tenant=%s", count, tenant_id)
+        return count

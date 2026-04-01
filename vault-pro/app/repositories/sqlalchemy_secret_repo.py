@@ -57,6 +57,24 @@ class SQLAlchemySecretRepository(SecretRepository):
             .scalar()
         )
 
+    def delete(self, tenant_id: str, secret_id: str) -> bool:
+        rows = (
+            self._db.query(SecretRecordORM)
+            .filter(SecretRecordORM.id == secret_id, SecretRecordORM.tenant_id == tenant_id)
+            .delete()
+        )
+        self._db.commit()
+        return rows > 0
+
+    def delete_all_by_tenant(self, tenant_id: str) -> int:
+        rows = (
+            self._db.query(SecretRecordORM)
+            .filter(SecretRecordORM.tenant_id == tenant_id)
+            .delete()
+        )
+        self._db.commit()
+        return rows
+
     @staticmethod
     def _to_domain(orm: SecretRecordORM) -> SecretRecord:
         return SecretRecord(

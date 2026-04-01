@@ -25,3 +25,11 @@ class SecretRepository(ABC):
     @abstractmethod
     def count_by_tenant(self, tenant_id: str) -> int:
         """Total number of records for a tenant."""
+
+    @abstractmethod
+    def delete(self, tenant_id: str, secret_id: str) -> bool:
+        """Delete a single secret. Returns True if it existed."""
+
+    @abstractmethod
+    def delete_all_by_tenant(self, tenant_id: str) -> int:
+        """Delete all secrets for a tenant. Returns count deleted."""
