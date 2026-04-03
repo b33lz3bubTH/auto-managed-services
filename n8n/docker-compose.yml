@@ -1,0 +1,164 @@
+# =============================================================================
+#  n8n Docker Compose - Lightweight Single Instance
+#  Server: 4GB RAM (or local device)
+#  Architecture: n8n Main + PostgreSQL
+#  Access: http://<your-ip>:5678
+# =============================================================================
+
+name: n8n
+
+services:
+
+  # ---------------------------------------------------------------------------
+  #  POSTGRESQL — Primary Database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: n8n-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    networks:
+      - n8n-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Tuned for 4GB server — PostgreSQL gets ~1GB
+    command: >
+      postgres
+      -c max_connections=50
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=256MB
+      -c max_wal_size=1GB
+      -c max_worker_processes=2
+      -c max_parallel_workers_per_gather=1
+      -c max_parallel_workers=2
+      -c max_parallel_maintenance_workers=1
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ---------------------------------------------------------------------------
+  #  N8N MAIN — UI, API, Scheduler, Webhooks, Execution (all-in-one)
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n-main
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # ── Database ───────────────────────────────────────────────────────────
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_POSTGRESDB_SCHEMA: public
+      # ── Instance identity ──────────────────────────────────────────────────
+      N8N_HOST: 0.0.0.0
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678/}
+      # ── Security ───────────────────────────────────────────────────────────
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_JWT_SECRET}
+      N8N_SECURE_COOKIE: "false"
+      # ── Timezone ───────────────────────────────────────────────────────────
+      GENERIC_TIMEZONE: ${TIMEZONE}
+      TZ: ${TIMEZONE}
+      # ── Logging ────────────────────────────────────────────────────────────
+      N8N_LOG_LEVEL: warn
+      N8N_LOG_OUTPUT: console
+      # ── Diagnostics / telemetry (opt-out) ──────────────────────────────────
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "true"
+      # ── Execution pruning ──────────────────────────────────────────────────
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336          # 14 days in hours
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: last
+      EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+      # ── Performance (conservative for 4GB) ─────────────────────────────────
+      N8N_PAYLOAD_SIZE_MAX: 16              # MB
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_BINARY_DATA_STORAGE_PATH: /home/node/.n8n/binaryData
+      NODE_OPTIONS: "--max-old-space-size=1024"
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - n8n_files:/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - n8n-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ---------------------------------------------------------------------------
+  #  PGBACKUP — Automated PostgreSQL Backups (daily at 2 AM)
+  # ---------------------------------------------------------------------------
+  pgbackup:
+    image: prodrigestivill/postgres-backup-local:16-alpine
+    container_name: n8n-pgbackup
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: 7
+      BACKUP_KEEP_WEEKS: 4
+      BACKUP_KEEP_MONTHS: 6
+      HEALTHCHECK_PORT: 8080
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - n8n-net
+
+# =============================================================================
+#  VOLUMES
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  n8n_data:
+    driver: local
+  n8n_files:
+    driver: local
+
+# =============================================================================
+#  NETWORKS
+# =============================================================================
+networks:
+  n8n-net:
+    driver: bridge
