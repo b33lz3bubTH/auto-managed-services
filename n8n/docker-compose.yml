@@ -78,12 +78,14 @@ services:
       N8N_HOST: 0.0.0.0
       N8N_PORT: 5678
       N8N_PROTOCOL: http
-      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
-      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678/}
+      # For local testing behind reverse proxy - use localhost
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_EDITOR_BASE_URL: http://localhost:5678/
       # ── Security ───────────────────────────────────────────────────────────
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_JWT_SECRET}
       N8N_SECURE_COOKIE: "false"
+      N8N_TRUSTED_PROXY: "true"
       # ── Timezone ───────────────────────────────────────────────────────────
       GENERIC_TIMEZONE: ${TIMEZONE}
       TZ: ${TIMEZONE}
@@ -103,7 +105,7 @@ services:
       # ── Performance (conservative for 4GB) ─────────────────────────────────
       N8N_PAYLOAD_SIZE_MAX: 16              # MB
       N8N_DEFAULT_BINARY_DATA_MODE: filesystem
-      N8N_BINARY_DATA_STORAGE_PATH: /home/node/.n8n/binaryData
+      N8N_STORAGE_PATH: /home/node/.n8n
       NODE_OPTIONS: "--max-old-space-size=1024"
     ports:
       - "5678:5678"
@@ -115,10 +117,39 @@ services:
         condition: service_healthy
     networks:
       - n8n-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5678/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
           memory: 2G
+
+  # ---------------------------------------------------------------------------
+  #  NGINX — Reverse Proxy for HTTPS/WSS (WebSocket Secure)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: n8n-nginx
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      n8n:
+        condition: service_healthy
+    networks:
+      - n8n-net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # ---------------------------------------------------------------------------
   #  PGBACKUP — Automated PostgreSQL Backups (daily at 2 AM)
