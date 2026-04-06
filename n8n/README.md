@@ -67,6 +67,9 @@ N8N_EDITOR_BASE_URL=http://YOUR_SERVER_IP:5678/
 
 # For local use, leave defaults (http://localhost:5678/)
 ```
+### 3.5 Generate the ssl
+
+`./generate-ssl.sh`
 
 ### 4. Start the stack
 
